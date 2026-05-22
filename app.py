@@ -33,7 +33,7 @@ with tab1:
     with col1:
         st.subheader("Experimental Parameters")
         uploaded_file = st.file_uploader("Upload Raw CV (CSV)", type=["csv"], key="file1")
-        mass = st.number_input("Active Mass (grams)", min_value=0.0001, value=0.1, format="%.4f")
+        mass = st.number_input("Active Mass (grams)", min_value=0.0001, value=0.1000, format="%.4f")
         data_unit = st.selectbox("Current Unit in CSV", ["A", "mA", "uA"], index=1)
         plot_unit = st.selectbox("Plot Unit", ["A", "mA", "uA"], index=1)
         
@@ -67,8 +67,8 @@ with tab1:
                 
                 scan_rate = float((i + 1) * 10) # Assuming 10, 20, 30...
                 
-                # Calculate Area & Capacitance
-                area = np.trapz(current_A, voltage)
+                # Calculate Area & Capacitance using updated numpy 2.0 syntax
+                area = np.trapezoid(current_A, voltage)
                 V1, V2 = voltage.min(), voltage.max()
                 
                 spec_cap = area / (mass * scan_rate * (V2 - V1))
