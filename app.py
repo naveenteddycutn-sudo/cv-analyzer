@@ -21,17 +21,17 @@ def factor_from_A(unit):
 
 # --- Page Config ---
 st.set_page_config(page_title="Electrochem Dashboard", layout="wide")
-st.title("🔋 Advanced CV & Dunn Method Analyzer")
+st.title("🔋 Advanced CV & Dunn Method Analyzer (Origin Export)")
 
 # --- Global Sidebar Setup ---
 st.sidebar.header("1. Upload & Global Settings")
 uploaded_file = st.sidebar.file_uploader("Upload Raw CV (CSV)", type=["csv"])
 mass = st.sidebar.number_input("Active Mass (grams)", min_value=0.0001, value=0.1000, format="%.4f")
 data_unit = st.sidebar.selectbox("Current Unit in CSV", ["A", "mA", "uA"], index=1)
-plot_unit = st.sidebar.selectbox("Plot Unit", ["A", "mA", "uA"], index=1)
+plot_unit = st.sidebar.selectbox("Desired Output Unit", ["A", "mA", "uA"], index=1)
 
 # --- Interactive Tabs ---
-tab1, tab2, tab3 = st.tabs(["1. CV & Capacitance", "2. Peak Extraction (b-value)", "3. Full Dunn's Method (k1/k2) & Export"])
+tab1, tab2, tab3 = st.tabs(["1. CV & Capacitance", "2. Peak Extraction (b-value)", "3. Full Dunn's Method Data Export"])
 
 if uploaded_file:
     # Read and clean the data globally
@@ -60,14 +60,24 @@ if uploaded_file:
     # TAB 1: BASIC CV & CAPACITANCE
     # ==========================================
     with tab1:
-        st.subheader("Cyclic Voltammetry Curves & Specific Capacitance")
+        st.subheader("Cyclic Voltammetry Data & Capacitance")
         fig, ax = plt.subplots(figsize=(8, 6))
         results = []
+        cv_export_dfs = [] # List to store data for Origin export
         
         for item in valid_data:
             v = item["voltage"]
             i_A = item["current_A"]
             sr = item["scan_rate"]
+            i_plot = i_A * A_to_plot
+            
+            # Store data for CSV export
+            temp_df = pd.DataFrame({
+                "Scan_Rate_mVs": sr,
+                "Voltage_V": v,
+                f"Current_{plot_unit}_per_g": i_plot
+            })
+            cv_export_dfs.append(temp_df)
             
             # Use trapezoid for area calculation
             try:
@@ -79,7 +89,7 @@ if uploaded_file:
             spec_cap = np.abs(area) / (mass * sr * 1e-3 * (V2 - V1)) # sr in V/s for Farads
             
             results.append({"Scan Rate (mV/s)": sr, "Capacitance (F/g)": spec_cap})
-            ax.plot(v, i_A * A_to_plot, label=f"{sr} mV/s")
+            ax.plot(v, i_plot, label=f"{sr} mV/s")
             
         ax.set_xlabel("Potential (V)")
         ax.set_ylabel(f"Specific Current ({plot_unit}/g)")
@@ -87,6 +97,15 @@ if uploaded_file:
         st.pyplot(fig)
         
         st.dataframe(pd.DataFrame(results), use_container_width=True)
+        
+        # Origin Export Button
+        df_all_cvs = pd.concat(cv_export_dfs, ignore_index=True)
+        st.download_button(
+            label="⬇️ Download All Cleaned CV Plot Data (for Origin)",
+            data=df_all_cvs.to_csv(index=False).encode('utf-8'),
+            file_name="cleaned_cv_data_all_scans.csv",
+            mime="text/csv"
+        )
 
     # ==========================================
     # TAB 2: PEAK EXTRACTION
@@ -112,35 +131,33 @@ if uploaded_file:
             cathodic_i.append(i_arr_plot[idx_c])
             
         sr_arr, a_i_arr, c_i_arr = np.array(scan_rates), np.array(anodic_i), np.array(cathodic_i)
-        
         log_sr = np.log(sr_arr)
-        fit_a_b = linregress(log_sr, np.log(np.abs(a_i_arr)))
-        fit_c_b = linregress(log_sr, np.log(np.abs(c_i_arr)))
         
-        cb1, cb2 = st.columns(2)
-        with cb1:
-            fig1, ax1 = plt.subplots(figsize=(5,4))
-            ax1.scatter(log_sr, np.log(np.abs(a_i_arr)), color='black')
-            ax1.plot(log_sr, fit_a_b.slope * log_sr + fit_a_b.intercept, 'r-', label=f"b = {fit_a_b.slope:.3f}")
-            ax1.set_title("Anodic Peak Power Law")
-            ax1.legend()
-            st.pyplot(fig1)
-        with cb2:
-            fig2, ax2 = plt.subplots(figsize=(5,4))
-            ax2.scatter(log_sr, np.log(np.abs(c_i_arr)), color='black')
-            ax2.plot(log_sr, fit_c_b.slope * log_sr + fit_c_b.intercept, 'b-', label=f"b = {fit_c_b.slope:.3f}")
-            ax2.set_title("Cathodic Peak Power Law")
-            ax2.legend()
-            st.pyplot(fig2)
+        # Generate Export DataFrame for Origin
+        df_peaks = pd.DataFrame({
+            "Scan_Rate_mVs": sr_arr,
+            "log_v": log_sr,
+            "Anodic_Peak_Current": a_i_arr,
+            "Cathodic_Peak_Current": c_i_arr,
+            "log_Anodic_i": np.log(np.abs(a_i_arr)),
+            "log_Cathodic_i": np.log(np.abs(c_i_arr))
+        })
+        
+        st.dataframe(df_peaks, use_container_width=True)
+        st.download_button(
+            label="⬇️ Download Power Law Peak Data (for Origin)",
+            data=df_peaks.to_csv(index=False).encode('utf-8'),
+            file_name="power_law_peak_data.csv",
+            mime="text/csv"
+        )
 
     # ==========================================
-    # TAB 3: FULL DUNN'S METHOD & EXPORT
+    # TAB 3: FULL DUNN'S METHOD EXPORT
     # ==========================================
     with tab3:
-        st.subheader("Full Dunn's Method ($k_1, k_2$) Profile")
-        st.write("Calculates the capacitive vs. diffusion contribution for the entire CV curve.")
+        st.subheader("Dunn's Method Data Generator")
+        st.write("This engine calculates k1 and k2 for the entire CV curve in the background. Select a scan rate below to generate the exact data files needed to plot the shaded capacitive contributions in Origin.")
         
-        # 1. Process data: separate anodic and cathodic sweeps and interpolate
         if len(valid_data) > 1:
             v_min = max([np.min(item['voltage']) for item in valid_data])
             v_max = min([np.max(item['voltage']) for item in valid_data])
@@ -204,7 +221,7 @@ if uploaded_file:
                 k1_cathodic[idx] = res_cat.slope
                 k2_cathodic[idx] = res_cat.intercept
 
-            # 3. User selects a scan rate to visualize and download
+            # 3. User selects a scan rate to download
             st.markdown("---")
             selected_sr = st.selectbox("Select Scan Rate to Generate Processed CSVs:", sr_array)
             
@@ -218,26 +235,7 @@ if uploaded_file:
                 i_diff_cathodic = k2_cathodic * np.sqrt(selected_sr)
                 i_total_cathodic = i_cap_cathodic + i_diff_cathodic
                 
-                # Plot the shaded contribution
-                fig3, ax3 = plt.subplots(figsize=(8, 6))
-                
-                # Plot outer total CV
-                ax3.plot(v_grid_anodic, i_total_anodic, 'k-', linewidth=2, label="Total Current")
-                ax3.plot(v_grid_cathodic, i_total_cathodic, 'k-', linewidth=2)
-                
-                # Fill inner capacitive CV
-                ax3.fill_between(v_grid_anodic, i_cap_anodic, 0, color='red', alpha=0.3, label="Capacitive Contrib.")
-                ax3.fill_between(v_grid_cathodic, i_cap_cathodic, 0, color='red', alpha=0.3)
-                
-                ax3.set_xlabel("Potential (V)")
-                ax3.set_ylabel(f"Specific Current ({plot_unit}/g)")
-                ax3.set_title(f"Dunn's Method Profile at {selected_sr} mV/s")
-                ax3.legend()
-                st.pyplot(fig3)
-                
                 # --- Export CSV Logic ---
-                st.subheader(f"Download Processed Data ({selected_sr} mV/s)")
-                
                 df_anode = pd.DataFrame({
                     "Voltage (V)": v_grid_anodic,
                     "Total_Current": i_total_anodic,
@@ -251,6 +249,8 @@ if uploaded_file:
                     "Capacitive_Current": i_cap_cathodic,
                     "Diffusion_Current": i_diff_cathodic
                 })
+                
+                st.success(f"Data for {selected_sr} mV/s processed successfully. Ready for Origin import.")
                 
                 c3, c4 = st.columns(2)
                 with c3:
