@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.stats import linregress
+from scipy.interpolate import interp1d
 
 # --- Helper Functions ---
 def normalize_unit(u):
@@ -30,10 +31,10 @@ data_unit = st.sidebar.selectbox("Current Unit in CSV", ["A", "mA", "uA"], index
 plot_unit = st.sidebar.selectbox("Plot Unit", ["A", "mA", "uA"], index=1)
 
 # --- Interactive Tabs ---
-tab1, tab2, tab3 = st.tabs(["1. CV & Capacitance", "2. Peak Extraction (b-value & k1/k2)", "3. Dunn's Method"])
+tab1, tab2, tab3 = st.tabs(["1. CV & Capacitance", "2. Peak Extraction (b-value)", "3. Full Dunn's Method (k1/k2) & Export"])
 
 if uploaded_file:
-    # Read and clean the data globally so all tabs can use it
+    # Read and clean the data globally
     uploaded_file.seek(0)
     data = pd.read_csv(uploaded_file).apply(pd.to_numeric, errors='coerce')
     to_A = factor_to_A(data_unit)
@@ -42,14 +43,13 @@ if uploaded_file:
     potential_cols = data.columns[::2]
     current_cols = data.columns[1::2]
     
-    # Store clean data arrays to avoid repeating loops
     valid_data = []
     for i, (pot_col, cur_col) in enumerate(zip(potential_cols, current_cols)):
         if "Unnamed" in str(cur_col): continue
         clean_data = pd.DataFrame({"V": data[pot_col], "I": data[cur_col]}).dropna()
         if clean_data.empty: continue
         
-        sr = float((i + 1) * 10) # Assumes 10, 20, 30... mV/s
+        sr = float((i + 1) * 10) # Assumes 10, 20, 30... mV/s based on column index
         valid_data.append({
             "scan_rate": sr,
             "voltage": clean_data["V"].astype(float).values,
@@ -60,7 +60,7 @@ if uploaded_file:
     # TAB 1: BASIC CV & CAPACITANCE
     # ==========================================
     with tab1:
-        st.subheader("Cyclic Voltammetry Curves")
+        st.subheader("Cyclic Voltammetry Curves & Specific Capacitance")
         fig, ax = plt.subplots(figsize=(8, 6))
         results = []
         
@@ -69,12 +69,16 @@ if uploaded_file:
             i_A = item["current_A"]
             sr = item["scan_rate"]
             
-            area = np.trapezoid(i_A, v)
+            # Use trapezoid for area calculation
+            try:
+                area = np.trapezoid(i_A, v)
+            except AttributeError:
+                area = np.trapz(i_A, v) # Fallback for older numpy
+                
             V1, V2 = v.min(), v.max()
+            spec_cap = np.abs(area) / (mass * sr * 1e-3 * (V2 - V1)) # sr in V/s for Farads
             
-            spec_cap = area / (mass * sr * (V2 - V1))
-            
-            results.append({"Scan Rate (mV/s)": sr, "Area (A·V/g)": area, "Capacitance (F/g)": spec_cap})
+            results.append({"Scan Rate (mV/s)": sr, "Capacitance (F/g)": spec_cap})
             ax.plot(v, i_A * A_to_plot, label=f"{sr} mV/s")
             
         ax.set_xlabel("Potential (V)")
@@ -88,144 +92,182 @@ if uploaded_file:
     # TAB 2: PEAK EXTRACTION
     # ==========================================
     with tab2:
-        st.subheader("Peak Extraction & Reaction Kinetics")
+        st.subheader("Peak Extraction & Reaction Kinetics ($i = a v^b$)")
         c1, c2 = st.columns(2)
         anodic_v = c1.number_input("Anodic Peak Potential (V)", value=0.50, step=0.05)
         cathodic_v = c2.number_input("Cathodic Peak Potential (V)", value=-0.50, step=0.05)
         
-        scan_rates = []
-        anodic_i = []
-        cathodic_i = []
+        scan_rates, anodic_i, cathodic_i = [], [], []
         
         for item in valid_data:
             v_arr = item["voltage"]
             i_arr_plot = item["current_A"] * A_to_plot 
             sr = item["scan_rate"]
-            
             scan_rates.append(sr)
             
-            # Find closest voltage to user input and extract that current
             idx_a = (np.abs(v_arr - anodic_v)).argmin()
             anodic_i.append(i_arr_plot[idx_a])
             
             idx_c = (np.abs(v_arr - cathodic_v)).argmin()
             cathodic_i.append(i_arr_plot[idx_c])
             
-        sr_arr = np.array(scan_rates)
-        a_i_arr = np.array(anodic_i)
-        c_i_arr = np.array(cathodic_i)
+        sr_arr, a_i_arr, c_i_arr = np.array(scan_rates), np.array(anodic_i), np.array(cathodic_i)
         
-        # --- 1. Power Law (b-value) ---
-        st.markdown("---")
-        st.markdown("### 1. Power Law ($i = a v^b$)")
         log_sr = np.log(sr_arr)
-        log_a_i = np.log(np.abs(a_i_arr))
-        log_c_i = np.log(np.abs(c_i_arr))
-        
-        fit_a_b = linregress(log_sr, log_a_i)
-        fit_c_b = linregress(log_sr, log_c_i)
+        fit_a_b = linregress(log_sr, np.log(np.abs(a_i_arr)))
+        fit_c_b = linregress(log_sr, np.log(np.abs(c_i_arr)))
         
         cb1, cb2 = st.columns(2)
         with cb1:
             fig1, ax1 = plt.subplots(figsize=(5,4))
-            ax1.scatter(log_sr, log_a_i, color='black')
+            ax1.scatter(log_sr, np.log(np.abs(a_i_arr)), color='black')
             ax1.plot(log_sr, fit_a_b.slope * log_sr + fit_a_b.intercept, 'r-', label=f"b = {fit_a_b.slope:.3f}")
-            ax1.set_xlabel("log(v)")
-            ax1.set_ylabel("log(i)")
-            ax1.set_title("Anodic Peak")
+            ax1.set_title("Anodic Peak Power Law")
             ax1.legend()
             st.pyplot(fig1)
         with cb2:
             fig2, ax2 = plt.subplots(figsize=(5,4))
-            ax2.scatter(log_sr, log_c_i, color='black')
+            ax2.scatter(log_sr, np.log(np.abs(c_i_arr)), color='black')
             ax2.plot(log_sr, fit_c_b.slope * log_sr + fit_c_b.intercept, 'b-', label=f"b = {fit_c_b.slope:.3f}")
-            ax2.set_xlabel("log(v)")
-            ax2.set_ylabel("log(i)")
-            ax2.set_title("Cathodic Peak")
+            ax2.set_title("Cathodic Peak Power Law")
             ax2.legend()
             st.pyplot(fig2)
-            
-        # --- 2. Dunn Method Parameters ---
-        st.markdown("---")
-        st.markdown("### 2. Dunn Method Parameters ($i/v^{1/2}$ vs $v^{1/2}$)")
-        sqrt_v = np.sqrt(sr_arr)
-        y_a = a_i_arr / sqrt_v
-        y_c = c_i_arr / sqrt_v
-        
-        fit_a_k = linregress(sqrt_v, y_a)
-        fit_c_k = linregress(sqrt_v, y_c)
-        
-        ck1, ck2 = st.columns(2)
-        with ck1:
-            fig3, ax3 = plt.subplots(figsize=(5,4))
-            ax3.scatter(sqrt_v, y_a, color='black')
-            ax3.plot(sqrt_v, fit_a_k.slope * sqrt_v + fit_a_k.intercept, 'r-', label=f"k1={fit_a_k.slope:.2e}\nk2={fit_a_k.intercept:.2e}")
-            ax3.set_xlabel("$v^{1/2}$")
-            ax3.set_ylabel("$i / v^{1/2}$")
-            ax3.set_title("Anodic Fit")
-            ax3.legend()
-            st.pyplot(fig3)
-        with ck2:
-            fig4, ax4 = plt.subplots(figsize=(5,4))
-            ax4.scatter(sqrt_v, y_c, color='black')
-            ax4.plot(sqrt_v, fit_c_k.slope * sqrt_v + fit_c_k.intercept, 'b-', label=f"k1={fit_c_k.slope:.2e}\nk2={fit_c_k.intercept:.2e}")
-            ax4.set_xlabel("$v^{1/2}$")
-            ax4.set_ylabel("$i / v^{1/2}$")
-            ax4.set_title("Cathodic Fit")
-            ax4.legend()
-            st.pyplot(fig4)
-            
-        # Silently pass data to Tab 3
-        st.session_state['sr_arr'] = sr_arr
-        st.session_state['k_anodic'] = (fit_a_k.slope, fit_a_k.intercept)
-        st.session_state['k_cathodic'] = (fit_c_k.slope, fit_c_k.intercept)
 
     # ==========================================
-    # TAB 3: DUNN's METHOD
+    # TAB 3: FULL DUNN'S METHOD & EXPORT
     # ==========================================
     with tab3:
-        st.subheader("Capacitive vs Diffusion Contributions")
-        if 'sr_arr' in st.session_state:
-            mode = st.radio("Select Peak to Visualize:", ["Anodic", "Cathodic"], horizontal=True)
+        st.subheader("Full Dunn's Method ($k_1, k_2$) Profile")
+        st.write("Calculates the capacitive vs. diffusion contribution for the entire CV curve.")
+        
+        # 1. Process data: separate anodic and cathodic sweeps and interpolate
+        if len(valid_data) > 1:
+            v_min = max([np.min(item['voltage']) for item in valid_data])
+            v_max = min([np.max(item['voltage']) for item in valid_data])
             
-            v = st.session_state['sr_arr']
-            if mode == "Anodic":
-                k1, k2 = st.session_state['k_anodic']
-            else:
-                k1, k2 = st.session_state['k_cathodic']
+            # Common voltage grid for interpolation
+            v_grid_anodic = np.linspace(v_min, v_max, 500)
+            v_grid_cathodic = np.linspace(v_max, v_min, 500)
+            
+            scan_rates_list = []
+            anodic_currents_interp = []
+            cathodic_currents_interp = []
+            
+            for item in valid_data:
+                v = item['voltage']
+                i = item['current_A'] * A_to_plot
                 
-            sqrt_v = np.sqrt(v)
-            i_cap = k1 * v
-            i_diff = k2 * sqrt_v
+                # Simple split based on voltage gradient
+                dv = np.diff(v)
+                split_idx = np.where(np.sign(dv[:-1]) != np.sign(dv[1:]))[0]
+                
+                if len(split_idx) >= 1:
+                    idx_turn = split_idx[0] + 1
+                    # Ensure correct sweep directions (anodic goes up, cathodic goes down)
+                    if v[1] > v[0]: 
+                        v_an, i_an = v[:idx_turn], i[:idx_turn]
+                        v_cat, i_cat = v[idx_turn:], i[idx_turn:]
+                    else:
+                        v_cat, i_cat = v[:idx_turn], i[:idx_turn]
+                        v_an, i_an = v[idx_turn:], i[idx_turn:]
+                        
+                    # Remove duplicates for interpolation
+                    v_an, unique_an = np.unique(v_an, return_index=True)
+                    i_an = i_an[unique_an]
+                    
+                    # Cathodic needs to be sorted for interpolation
+                    v_cat_sorted, unique_cat = np.unique(v_cat, return_index=True)
+                    i_cat_sorted = i_cat[unique_cat]
+                    
+                    interp_an = interp1d(v_an, i_an, bounds_error=False, fill_value="extrapolate")
+                    interp_cat = interp1d(v_cat_sorted, i_cat_sorted, bounds_error=False, fill_value="extrapolate")
+                    
+                    anodic_currents_interp.append(interp_an(v_grid_anodic))
+                    cathodic_currents_interp.append(interp_cat(v_grid_cathodic))
+                    scan_rates_list.append(item['scan_rate'])
             
-            cap_mag = np.abs(i_cap)
-            diff_mag = np.abs(i_diff)
-            total_mag = cap_mag + diff_mag
+            sr_array = np.array(scan_rates_list)
+            sqrt_sr = np.sqrt(sr_array)
             
-            cap_pct = (cap_mag / total_mag) * 100.0
-            diff_pct = (diff_mag / total_mag) * 100.0
+            # 2. Calculate k1 and k2 for every voltage point
+            k1_anodic, k2_anodic = np.zeros_like(v_grid_anodic), np.zeros_like(v_grid_anodic)
+            k1_cathodic, k2_cathodic = np.zeros_like(v_grid_cathodic), np.zeros_like(v_grid_cathodic)
             
-            fig5, ax5 = plt.subplots(figsize=(8,6))
-            width = 3.0
+            for idx in range(len(v_grid_anodic)):
+                i_an = np.array([curve[idx] for curve in anodic_currents_interp])
+                res_an = linregress(sqrt_sr, i_an / sqrt_sr)
+                k1_anodic[idx] = res_an.slope
+                k2_anodic[idx] = res_an.intercept
+                
+                i_cat = np.array([curve[idx] for curve in cathodic_currents_interp])
+                res_cat = linregress(sqrt_sr, i_cat / sqrt_sr)
+                k1_cathodic[idx] = res_cat.slope
+                k2_cathodic[idx] = res_cat.intercept
+
+            # 3. User selects a scan rate to visualize and download
+            st.markdown("---")
+            selected_sr = st.selectbox("Select Scan Rate to Generate Processed CSVs:", sr_array)
             
-            bars1 = ax5.bar(v, cap_pct, width=width, color='black', label="Capacitive")
-            bars2 = ax5.bar(v, diff_pct, width=width, bottom=cap_pct, color='red', label="Diffusion")
-            
-            # Add publication-standard data labels
-            for bar, cap in zip(bars1, cap_pct):
-                ax5.text(bar.get_x() + bar.get_width()/2, bar.get_height()/2, f"{cap:.1f}%", 
-                         ha='center', va='center', rotation=90, color='white', fontsize=10, fontweight='bold')
-            for bar, cap, diff in zip(bars2, cap_pct, diff_pct):
-                ax5.text(bar.get_x() + bar.get_width()/2, cap + bar.get_height()/2, f"{diff:.1f}%", 
-                         ha='center', va='center', rotation=90, color='white', fontsize=10, fontweight='bold')
-                         
-            ax5.set_ylim(0, 100)
-            ax5.set_xlabel("Scan rate (mV/s)")
-            ax5.set_ylabel("Contribution (%)")
-            ax5.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-            st.pyplot(fig5)
-            
-            df_cont = pd.DataFrame({"Scan Rate (mV/s)": v, "Capacitive (%)": cap_pct, "Diffusion (%)": diff_pct})
-            st.dataframe(df_cont, use_container_width=True)
+            if selected_sr:
+                # Reconstruct components for the chosen scan rate
+                i_cap_anodic = k1_anodic * selected_sr
+                i_diff_anodic = k2_anodic * np.sqrt(selected_sr)
+                i_total_anodic = i_cap_anodic + i_diff_anodic
+                
+                i_cap_cathodic = k1_cathodic * selected_sr
+                i_diff_cathodic = k2_cathodic * np.sqrt(selected_sr)
+                i_total_cathodic = i_cap_cathodic + i_diff_cathodic
+                
+                # Plot the shaded contribution
+                fig3, ax3 = plt.subplots(figsize=(8, 6))
+                
+                # Plot outer total CV
+                ax3.plot(v_grid_anodic, i_total_anodic, 'k-', linewidth=2, label="Total Current")
+                ax3.plot(v_grid_cathodic, i_total_cathodic, 'k-', linewidth=2)
+                
+                # Fill inner capacitive CV
+                ax3.fill_between(v_grid_anodic, i_cap_anodic, 0, color='red', alpha=0.3, label="Capacitive Contrib.")
+                ax3.fill_between(v_grid_cathodic, i_cap_cathodic, 0, color='red', alpha=0.3)
+                
+                ax3.set_xlabel("Potential (V)")
+                ax3.set_ylabel(f"Specific Current ({plot_unit}/g)")
+                ax3.set_title(f"Dunn's Method Profile at {selected_sr} mV/s")
+                ax3.legend()
+                st.pyplot(fig3)
+                
+                # --- Export CSV Logic ---
+                st.subheader(f"Download Processed Data ({selected_sr} mV/s)")
+                
+                df_anode = pd.DataFrame({
+                    "Voltage (V)": v_grid_anodic,
+                    "Total_Current": i_total_anodic,
+                    "Capacitive_Current": i_cap_anodic,
+                    "Diffusion_Current": i_diff_anodic
+                })
+                
+                df_cathode = pd.DataFrame({
+                    "Voltage (V)": v_grid_cathodic,
+                    "Total_Current": i_total_cathodic,
+                    "Capacitive_Current": i_cap_cathodic,
+                    "Diffusion_Current": i_diff_cathodic
+                })
+                
+                c3, c4 = st.columns(2)
+                with c3:
+                    st.download_button(
+                        label="⬇️ Download Anode Processed CSV",
+                        data=df_anode.to_csv(index=False).encode('utf-8'),
+                        file_name=f"anode_processed_CV_{int(selected_sr)}mVs.csv",
+                        mime="text/csv"
+                    )
+                with c4:
+                    st.download_button(
+                        label="⬇️ Download Cathode Processed CSV",
+                        data=df_cathode.to_csv(index=False).encode('utf-8'),
+                        file_name=f"cathode_processed_CV_{int(selected_sr)}mVs.csv",
+                        mime="text/csv"
+                    )
+        else:
+            st.warning("Upload a CSV with multiple scan rates to run Dunn's Method.")
 else:
     st.info("👈 Please upload a CSV file in the sidebar to begin analysis.")
